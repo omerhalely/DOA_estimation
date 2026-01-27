@@ -6,9 +6,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 import os
+from pathlib import Path
 
 def plot_spectrum(output, target, file_name):
     png_dir = './spectrum_plots/' + file_name
+    path_obj = Path(png_dir)
+    folder_path = path_obj.parent
+    folder_path.mkdir(parents=True, exist_ok=True)
 
     output = output.cpu().numpy()[0]
     target = target.cpu().numpy()[0]

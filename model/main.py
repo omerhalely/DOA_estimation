@@ -69,6 +69,6 @@ class GI_DOAEnet(torch.nn.Module):
             vad_framed = self.STFT.get_vad_framed(vad)  
             target = target_spatial_spectrum(polar_position, vad_framed, self.SSMBs.degree_candidate, self.gammas)  # B, DS, Degree, T 
 
-            return x_out, target  
+            return x_out, target, vad_framed
         else:
             return x_out

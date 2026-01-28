@@ -3,7 +3,7 @@ from torch import nn
 import math
 
 def target_spatial_spectrum(target_polar_position, vad_framed, degrees, gammas):
-    target_azimuths= target_polar_position[..., 0].unsqueeze(-1)  # B, Spk, 1
+    target_azimuths= torch.rad2deg(target_polar_position[..., 1].unsqueeze(1)).unsqueeze(-1)  # B, Spk, 1
     cadidate_azimuths = torch.linspace(0, 360, degrees, device=target_azimuths.device).view(1, 1, -1)
 
     distance_abs = torch.abs(target_azimuths - cadidate_azimuths)  # B, Spk, num_candidate

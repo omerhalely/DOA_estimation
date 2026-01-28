@@ -12,7 +12,7 @@ import webrtcvad
 
 
 class LibriSpeechDataset(Dataset):
-    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000, target_frames=497):
+    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000):
         """
         LibriSpeech dataset with room impulse response simulation.
         
@@ -30,7 +30,8 @@ class LibriSpeechDataset(Dataset):
         self.sound_velocity = 343.0  # Speed of sound in m/s
         self.device = device
         self.max_microphones = max_microphones
-        self.target_frames = target_frames
+
+        self.num_microphones = 4
 
         self.vad = webrtcvad.Vad(3)
         self.frame_duration = 30  # ms
@@ -79,6 +80,9 @@ class LibriSpeechDataset(Dataset):
         while offset + n <= len(audio):
             yield audio[offset:offset + n].tobytes()
             offset += n
+    
+    def sample_num_microphones(self):
+        self.num_microphones = torch.randint(4, self.max_microphones + 1, (1,), device=self.device).item()
 
     def _generate_random_room(self):
         # 1. Randomize Room Dimensions (Table III)
@@ -93,7 +97,7 @@ class LibriSpeechDataset(Dataset):
         fs = 16000  # Sampling rate used in paper
 
         # 3. Dynamic Microphone Geometry (Section III-A)
-        num_channels = torch.randint(4, self.max_microphones + 1, (1,), device=self.device).item()  # Stage 3: 4-12 channels
+        num_channels = self.num_microphones
         
         # Equation (25) for R_min and R_max
         c_min, c_max = 4, 12
@@ -226,14 +230,15 @@ class LibriSpeechDataset(Dataset):
             if frame_idx <= 2:
                 vad_list[frame_idx] = 0.0
                 
-        # Resample VAD to match target_frames (497 frames)
+        # Resample VAD to match audio length (64000 samples)
         vad_tensor = torch.tensor(vad_list, dtype=torch.float32)
         if len(vad_tensor) > 0:
-            indices = torch.linspace(0, len(vad_tensor) - 1, self.target_frames)
+            indices = torch.linspace(0, len(vad_tensor) - 1, audio.shape[-1])
             vad = vad_tensor[torch.round(indices).long()]
         else:
             # Fallback: all speech
-            vad = torch.ones(self.target_frames, dtype=torch.float32)
+            vad = torch.ones(audio.shape[-1], dtype=torch.float32)
+        vad = vad.unsqueeze(0).expand(self.num_microphones, vad.shape[-1])
         
         # Use original float audio for RIR simulation
         # Generate random room and get RIR (returns numpy from gpuRIR)
@@ -285,6 +290,8 @@ if __name__ == "__main__":
         sample_rate=sample_rate,
         device=device
     )
+
+    dataset.sample_num_microphones()
     
     print(f"✓ Dataset created successfully")
     print(f"  - Dataset size: {len(dataset)} samples")
@@ -399,7 +406,7 @@ if __name__ == "__main__":
     ax1.grid(True, alpha=0.3)
     
     # Plot 2: VAD signal
-    vad_np = vad.cpu().numpy()
+    vad_np = vad[0, :].cpu().numpy()
     time_frames = np.linspace(0, audio.shape[1] / sample_rate, len(vad_np))
     ax2.fill_between(time_frames, 0, vad_np, color='green', alpha=0.6, label='Voice Activity')
     ax2.plot(time_frames, vad_np, color='darkgreen', linewidth=1.5)

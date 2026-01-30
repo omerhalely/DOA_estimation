@@ -12,7 +12,7 @@ import webrtcvad
 
 
 class LibriSpeechDataset(Dataset):
-    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000):
+    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000, training_phase=1, logger=None):
         """
         LibriSpeech dataset with room impulse response simulation.
         
@@ -21,6 +21,10 @@ class LibriSpeechDataset(Dataset):
             mode: One of 'train', 'validation', or 'test'
             sample_rate: Audio sample rate in Hz (default: 16000)
             device: PyTorch device ('cuda', 'cpu', or None for auto-detect)
+            training_phase: Training curriculum phase (1, 2, or 3):
+                Phase 1: Fixed 4 microphones with fixed geometry
+                Phase 2: Fixed 4 microphones with random geometry
+                Phase 3: Random microphones (4-max) with random geometry
         """
         self.data_path = data_path
         self.mode = mode
@@ -30,8 +34,18 @@ class LibriSpeechDataset(Dataset):
         self.sound_velocity = 343.0  # Speed of sound in m/s
         self.device = device
         self.max_microphones = max_microphones
+        self.logger = logger  # Optional logger for training messages
 
         self.num_microphones = 4
+        
+        # Training phase management
+        self.training_phase = training_phase
+        self._validate_phase()
+        
+        # Fixed microphone coordinates for Phase 1 (generated once)
+        self._fixed_mic_coords = None
+        if self.training_phase == 1:
+            self._initialize_fixed_mics()
 
         self.vad = webrtcvad.Vad(3)
         self.frame_duration = 30  # ms
@@ -49,6 +63,74 @@ class LibriSpeechDataset(Dataset):
 
         self.data_path = os.path.join(self.data_path, folder_name)
         self.files = [f for f in os.listdir(self.data_path) if f.endswith('.flac')]
+    
+    def _validate_phase(self):
+        """Validate that the training phase is valid."""
+        if self.training_phase not in [1, 2, 3]:
+            raise ValueError(f"Training phase must be 1, 2, or 3, got {self.training_phase}")
+    
+    def set_training_phase(self, phase):
+        """
+        Change the training phase.
+        
+        Args:
+            phase: New training phase (1, 2, or 3)
+        """
+        self.training_phase = phase
+        self._validate_phase()
+        
+        # Initialize fixed mics for Phase 1 if switching to it
+        if phase == 1 and self._fixed_mic_coords is None:
+            self._initialize_fixed_mics()
+        
+        
+        message = f"Training phase set to {phase}"
+        if phase == 1:
+            message += " -> Fixed 4 microphones with fixed geometry"
+        elif phase == 2:
+            message += " -> Fixed 4 microphones with random geometry"
+        elif phase == 3:
+            message += f" -> Random microphones (4-{self.max_microphones}) with random geometry"
+        
+        if self.logger:
+            self.logger.info(message)
+        else:
+            print(message)
+    
+    def _initialize_fixed_mics(self):
+        """
+        Generate a fixed microphone array configuration for Phase 1.
+        Uses the same generation logic but stores the result.
+        """
+        num_channels = 4
+        c_min, c_max = 4, 12
+        progress = (num_channels - c_min) / (c_max - c_min)
+        r_min = max(1, 4 - 3 * progress) / 100.0
+        r_max = max(7, 9 + 4 * progress) / 100.0
+        # r_min = torch.empty(1, device=self.device).uniform_(r_min, 6).item() / 100.0
+        # r_max = torch.empty(1, device=self.device).uniform_(7, r_max).item() / 100.0
+        
+        mpos_local = []
+        while len(mpos_local) < num_channels:
+            candidate = torch.empty(3, device=self.device).uniform_(-2 * r_max, 2 * r_max)
+            if len(mpos_local) == 0:
+                mpos_local.append(candidate)
+            else:
+                dists = [torch.norm(candidate - m).item() for m in mpos_local]
+                if all(r_min <= d <= r_max for d in dists):
+                    mpos_local.append(candidate)
+        
+        mpos_local = torch.stack(mpos_local)
+        mpos_local -= mpos_local.mean(dim=0)  # Center array
+        # r_jitter = torch.empty(mpos_local.shape, device=self.device).uniform_(-0.5 / 100, 0.5 / 100)
+        # mpos_local += r_jitter
+        
+        # Random rotation
+        rotation_matrix = torch.from_numpy(R.random().as_matrix()).float().to(self.device)
+        mpos_local = (rotation_matrix @ mpos_local.T).T
+        
+        self._fixed_mic_coords = mpos_local
+        print(f"Initialized fixed microphone array for Phase 1 with {num_channels} microphones")
 
     def __len__(self):
         return len(self.files)
@@ -82,7 +164,13 @@ class LibriSpeechDataset(Dataset):
             offset += n
     
     def sample_num_microphones(self):
-        self.num_microphones = torch.randint(4, self.max_microphones + 1, (1,), device=self.device).item()
+        """Sample number of microphones based on current training phase."""
+        if self.training_phase in [1, 2]:
+            # Phase 1 & 2: Always use 4 microphones
+            self.num_microphones = 4
+        else:
+            # Phase 3: Random number of microphones
+            self.num_microphones = torch.randint(4, self.max_microphones + 1, (1,), device=self.device).item()
 
     def _generate_random_room(self):
         # 1. Randomize Room Dimensions (Table III)
@@ -99,28 +187,40 @@ class LibriSpeechDataset(Dataset):
         # 3. Dynamic Microphone Geometry (Section III-A)
         num_channels = self.num_microphones
         
-        # Equation (25) for R_min and R_max
-        c_min, c_max = 4, 12
-        progress = (num_channels - c_min) / (c_max - c_min)
-        r_min = max(1, 4 - 3 * progress) / 100.0  # meters
-        r_max = max(7, 9 + 4 * progress) / 100.0  # meters
+        # Phase-dependent microphone generation
+        if self.training_phase == 1:
+            # Phase 1: Use fixed microphone coordinates
+            mpos_local = self._fixed_mic_coords.clone()
+        else:
+            # Phase 2 & 3: Generate random microphone geometry
+            # Equation (25) for R_min and R_max
+            c_min, c_max = 4, 12
+            progress = (num_channels - c_min) / (c_max - c_min)
+            r_min = max(1, 4 - 3 * progress) / 100.0
+            r_max = max(7, 9 + 4 * progress) / 100.0
+            # r_min = torch.empty(1, device=self.device).uniform_(r_min, 6).item() / 100.0
+            # r_max = torch.empty(1, device=self.device).uniform_(7, r_max).item() / 100.0
 
-        mpos_local = []
-        while len(mpos_local) < num_channels:
-            candidate = torch.empty(3, device=self.device).uniform_(-r_max, r_max)
-            if len(mpos_local) == 0:
-                mpos_local.append(candidate)
-            else:
-                dists = [torch.norm(candidate - m).item() for m in mpos_local]
-                if all(r_min <= d <= r_max for d in dists):
+            mpos_local = []
+            while len(mpos_local) < num_channels:
+                candidate = torch.empty(3, device=self.device).uniform_(-r_max, r_max)
+                if len(mpos_local) == 0:
                     mpos_local.append(candidate)
-        
-        mpos_local = torch.stack(mpos_local)  # (num_channels, 3) on self.device
-        mpos_local -= mpos_local.mean(dim=0)  # Center array
-        
-        # Random rotation using scipy (keep this as is, rotation matrix is small)
-        rotation_matrix = torch.from_numpy(R.random().as_matrix()).float().to(self.device)
-        mpos_local = (rotation_matrix @ mpos_local.T).T  # Random rotation
+                else:
+                    dists = [torch.norm(candidate - m).item() for m in mpos_local]
+                    if all(r_min <= d <= r_max for d in dists):
+                        mpos_local.append(candidate)
+                    # else:
+                    #     print("Failed to generate valid microphone geometry")
+            
+            mpos_local = torch.stack(mpos_local)  # (num_channels, 3) on self.device
+            mpos_local -= mpos_local.mean(dim=0)  # Center array
+            # r_jitter = torch.empty(mpos_local.shape, device=self.device).uniform_(-0.5 / 100, 0.5 / 100)
+            # mpos_local += r_jitter
+            
+            # Random rotation using scipy (keep this as is, rotation matrix is small)
+            rotation_matrix = torch.from_numpy(R.random().as_matrix()).float().to(self.device)
+            mpos_local = (rotation_matrix @ mpos_local.T).T  # Random rotation
         
         # 4. Source Position (Table III)
         margin = 0.1
@@ -291,6 +391,7 @@ if __name__ == "__main__":
         device=device
     )
 
+    dataset.set_training_phase(3)
     dataset.sample_num_microphones()
     
     print(f"✓ Dataset created successfully")

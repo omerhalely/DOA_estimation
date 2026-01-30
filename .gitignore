@@ -1,4 +1,5 @@
 data
+runs
 *__pycache__
 *.png
 *.json

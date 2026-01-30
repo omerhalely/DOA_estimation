@@ -2,25 +2,38 @@ import torch
 from torch import nn
 import math
 
-def target_spatial_spectrum(target_polar_position, vad_framed, degrees, gammas):
+def target_spatial_spectrum(target_polar_position, vad_framed, gammas):
+    azimuth_degrees = 360
+    elevation_degrees = 120
     target_azimuths= torch.rad2deg(target_polar_position[..., 1].unsqueeze(1)).unsqueeze(-1)  # B, Spk, 1
-    cadidate_azimuths = torch.linspace(0, 360, degrees, device=target_azimuths.device).view(1, 1, -1)
+    cadidate_azimuths = torch.linspace(0, 360, azimuth_degrees, device=target_azimuths.device).view(1, 1, -1)
+
+    target_elevations= torch.rad2deg(target_polar_position[..., 2].unsqueeze(1)).unsqueeze(-1)  # B, Spk, 1
+    cadidate_elevations = torch.linspace(30, 150, elevation_degrees, device=target_elevations.device).view(1, 1, -1)
 
     distance_abs = torch.abs(target_azimuths - cadidate_azimuths)  # B, Spk, num_candidate
     distance_abs = torch.stack((distance_abs, 360 - distance_abs), dim=0)  # 2, B, Spk, num_candidate
-    distance = torch.min(distance_abs, dim=0).values  # B, Spk, num_candidate
-    distance = torch.deg2rad(distance).unsqueeze(1)  # B, 1, Spk, num_candidate
+    distance_az = torch.min(distance_abs, dim=0).values  # B, Spk, num_candidate
+    distance_az = torch.deg2rad(distance_az).unsqueeze(1)  # B, 1, Spk, num_candidate
+
+    distance_abs = torch.abs(target_elevations - cadidate_elevations)  # B, Spk, num_candidate
+    distance_el = torch.deg2rad(distance_abs).unsqueeze(1)  # B, 1, Spk, num_candidate
 
     gammas = torch.tensor(gammas, dtype=torch.float32, device=target_azimuths.device).view(1, -1, 1, 1)  # 1, num_gamma, 1, 1
     gammas = torch.deg2rad(gammas)  # 1, num_gamma, 1, 1
 
     kappa = math.log(0.5**0.5) / (torch.cos(gammas) - 1)  # 1, num_gamma, 1, 1
-    distance = torch.exp(kappa * (torch.cos(distance) - 1)).unsqueeze(-1)  # B, num_gamma, Spk, num_candidate, 1
+
+    distance_az = torch.exp(kappa * (torch.cos(distance_az) - 1)).unsqueeze(-1)  # B, num_gamma, Spk, num_candidate, 1
+    distance_el = torch.exp(kappa * (torch.cos(distance_el) - 1)).unsqueeze(-1)  # B, num_gamma, Spk, num_candidate, 1
 
     vad_framed = vad_framed.view(vad_framed.shape[0], 1, vad_framed.shape[1], 1, -1)  # B, 1, Spk, 1, T
-    target = vad_framed * distance  # B, num_gamma, Spk, num_candidate, T
-    target = torch.max(target, dim=2).values  # B, num_gamma, num_candidate, T
-    return target  # B, num_gamma, num_candidate, T
+    target_az = vad_framed * distance_az  # B, num_gamma, Spk, num_candidate, T
+    target_el = vad_framed * distance_el  # B, num_gamma, Spk, num_candidate, T
+
+    target_az = torch.max(target_az, dim=2).values  # B, num_gamma, num_candidate, T
+    target_el = torch.max(target_el, dim=2).values  # B, num_gamma, num_candidate, T
+    return target_az, target_el  # B, num_gamma, num_candidate, T
 
 def channelwise_softmax_aggregation(x, std=True):
 

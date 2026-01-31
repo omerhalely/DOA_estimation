@@ -1,5 +1,8 @@
-data
-runs
+data/
+runs/
+saved_models/
 *__pycache__
 *.png
 *.json
+*.log
+*.tar

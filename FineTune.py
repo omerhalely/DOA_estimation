@@ -15,7 +15,7 @@ torch.manual_seed(42)
 
 
 class Trainer:
-    def __init__(self, model_name, data_path, mode, device, max_microphones, sample_rate, MPE_type, batch_size, lr, epochs):
+    def __init__(self, model_name, data_path, mode, device, max_microphones, sample_rate, MPE_type, batch_size, lr, epochs, resume_from_checkpoint=False):
         self.model_name = model_name
         self.data_path = data_path
         self.mode = mode
@@ -26,8 +26,11 @@ class Trainer:
         self.batch_size = batch_size
         self.lr = lr
         self.epochs = epochs
+        self.resume_from_checkpoint = resume_from_checkpoint
 
         self.training_phase = 1
+        self.start_epoch = 0
+        self.min_loss = torch.inf
         
         # Setup logger
         self._setup_logger()
@@ -65,6 +68,10 @@ class Trainer:
             training_phase=self.training_phase,
             logger=self.logger,
         )
+
+        # Load checkpoint if resuming training
+        if self.resume_from_checkpoint:
+            self.load_checkpoint()
     
     def _setup_logger(self):
         """Setup logger with both file and console handlers."""
@@ -128,6 +135,41 @@ class Trainer:
         self.logger.info("Frozen all layers except SSMBs_elvation for fine-tuning")
         model.to(self.device)
         return model
+    
+    def load_checkpoint(self):
+        """Load checkpoint to resume training from a previous state."""
+        checkpoint_path = os.path.join(os.getcwd(), "saved_models", self.model_name, f"{self.model_name}.tar")
+        
+        if not os.path.exists(checkpoint_path):
+            self.logger.warning(f"No checkpoint found at {checkpoint_path}. Starting from scratch.")
+            return
+        
+        self.logger.info(f"Loading checkpoint from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # Load model state
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.logger.info("Loaded model state from checkpoint")
+        
+        # Load optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.logger.info("Loaded optimizer state from checkpoint")
+        
+        # Load scheduler state
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.logger.info("Loaded scheduler state from checkpoint")
+        
+        # Load training metadata
+        self.start_epoch = checkpoint['epoch'] + 1  # Resume from next epoch
+        self.training_phase = checkpoint['training_phase']
+        self.min_loss = checkpoint['min_loss']
+        
+        # Update dataset training phase
+        self.dataset.set_training_phase(self.training_phase)
+        
+        self.logger.info(f"Resuming from epoch {self.start_epoch}")
+        self.logger.info(f"Training phase: {self.training_phase}")
+        self.logger.info(f"Min loss so far: {self.min_loss:.4f}")
     
     def set_training_phase(self, phase):
         """
@@ -362,10 +404,9 @@ class Trainer:
 
         model_dir = os.path.join(os.getcwd(), "saved_models", self.model_name)
         os.makedirs(model_dir, exist_ok=True)
-        model_path = os.path.join(model_dir, f"{self.model_name}.tar")
+        checkpoint_path = os.path.join(model_dir, f"{self.model_name}.tar")
 
-        min_loss = torch.inf
-        for epoch in range(self.epochs):
+        for epoch in range(self.start_epoch, self.epochs):
             # Automatic phase switching based on epoch
             new_phase = self._should_switch_phase(epoch)
             if new_phase is not None:
@@ -392,10 +433,20 @@ class Trainer:
             loss = self.train_one_epoch(epoch)
             self.logger.info(f"Epoch {epoch}, Loss: {loss:.4f}")
 
-            if loss < min_loss:
-                min_loss = loss
-                torch.save(self.model.state_dict(), model_path)
-                self.logger.info(f"Saved model to: {model_path}")
+            if loss < self.min_loss:
+                self.min_loss = loss
+                
+                # Save checkpoint when achieving new best loss
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'training_phase': self.training_phase,
+                    'min_loss': self.min_loss,
+                }
+                torch.save(checkpoint, checkpoint_path)
+                self.logger.info(f"Saved checkpoint to: {checkpoint_path}")
             
             # Update learning rate based on loss
             self.scheduler.step(loss)
@@ -423,6 +474,7 @@ if __name__ == "__main__":
     batch_size = 16
     lr = 1e-4
     epochs = 300
+    resume_from_checkpoint = False
 
     trainer = Trainer(
         model_name=model_name,
@@ -435,6 +487,7 @@ if __name__ == "__main__":
         batch_size=batch_size,
         lr=lr,
         epochs=epochs,
+        resume_from_checkpoint=resume_from_checkpoint,
     )
     
     trainer()

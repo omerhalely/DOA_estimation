@@ -37,7 +37,7 @@ class LibriSpeechInference:
         pretrained = torch.load(model_path, map_location='cpu')
         model = GI_DOAEnet(MPE_type=self.MPE_type)
         model.load_layers()
-        model.load_state_dict(pretrained, strict=True)
+        model.load_state_dict(pretrained["model_state_dict"], strict=True)
         model.to(self.device)
         return model
     

@@ -32,11 +32,10 @@ class LibriSpeechInference:
     
     def load_model(self):
         print("Loading model...")
-        # model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
-        model_path = os.path.join(os.getcwd(), "saved_models", "GI_DOAEnet_fine_tuned", "GI_DOAEnet_fine_tuned.tar")
+        model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
+        # model_path = os.path.join(os.getcwd(), "saved_models", "GI_DOAEnet_fine_tuned", "GI_DOAEnet_fine_tuned.tar")
         pretrained = torch.load(model_path, map_location='cpu')
         model = GI_DOAEnet(MPE_type=self.MPE_type)
-        model.load_layers()
         model.load_state_dict(pretrained["model_state_dict"], strict=True)
         model.to(self.device)
         return model

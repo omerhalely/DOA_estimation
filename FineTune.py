@@ -120,19 +120,22 @@ class Trainer:
         self.logger.info("Loading pretrained model...")
         model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
         pretrained = torch.load(model_path, map_location='cpu')
-        model = GI_DOAEnet(MPE_type=self.MPE_type)
-        model.load_state_dict(pretrained, strict=True)  
-        model.load_layers()
         
-        # Freeze all parameters
-        for param in model.parameters():
+        # Initialize model with random weights
+        model = GI_DOAEnet(MPE_type=self.MPE_type)
+        
+        # Extract only CIFE (Channel_invariant_feature_extractor) weights from pretrained model
+        cife_state_dict = {k.replace('CIFE.', ''): v for k, v in pretrained.items() if k.startswith('CIFE.')}
+        
+        # Load only CIFE weights from pretrained model
+        model.CIFE.load_state_dict(cife_state_dict, strict=True)
+        self.logger.info("Loaded CIFE (Channel Independent Feature Extractor) from pretrained model")
+        
+        # Freeze only CIFE parameters
+        for param in model.CIFE.parameters():
             param.requires_grad = False
         
-        # Unfreeze only the new elevation_mapping_layers
-        for param in model.SSMBs_elvation.parameters():
-            param.requires_grad = True
-        
-        self.logger.info("Frozen all layers except SSMBs_elvation for fine-tuning")
+        self.logger.info("Frozen CIFE. All other layers initialized randomly and are trainable.")
         model.to(self.device)
         return model
     
@@ -339,7 +342,7 @@ class Trainer:
 
             loss_az = self.BCE_loss(x_out_az, target_az, vad_framed)
             loss_el = self.BCE_loss(x_out_el, target_el, vad_framed)
-            loss = loss_el
+            loss = loss_az + loss_el
             loss.backward()
             
             # Gradient clipping
@@ -468,7 +471,7 @@ if __name__ == "__main__":
     data_path = os.path.join(os.getcwd(), "data")
     mode = "validation"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    max_microphones = 12
+    max_microphones = 8
     sample_rate = 16000
     MPE_type = "PM"
     batch_size = 16

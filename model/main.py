@@ -39,18 +39,15 @@ class GI_DOAEnet(torch.nn.Module):
                                         feature_size=self.feature_size,
                                         rnn_layers=2,)        
         
-        self.SSMBs=Spatial_spectrum_mapping(feature = self.feature_size,
-                                            total_degrees = 360,
-                                            degree_resolution = 1, 
-                                            num_blocks = 3,
-                                            kernel_size = 3, 
-                                            dilation_rate = 2)        
+        self.SSMBs_azimuth = Spatial_spectrum_mapping(
+            feature = self.feature_size,
+            total_degrees = 360,
+            degree_resolution = 1, 
+            num_blocks = 3,
+            kernel_size = 3, 
+            dilation_rate = 2
+        )
 
-        self.gammas = [2.5, 2.5, 2.5]
-
-    def load_layers(self):
-        # self.RoPE = RoPE()
-        # self.SSMBs.load_layers()
         self.SSMBs_elvation = Spatial_spectrum_mapping(
             feature = self.feature_size,
             total_degrees = 120,
@@ -58,7 +55,9 @@ class GI_DOAEnet(torch.nn.Module):
             num_blocks = 3,
             kernel_size = 3, 
             dilation_rate = 2
-        )
+        )    
+
+        self.gammas = [2.5, 2.5, 2.5]
     
     def set_gamma(self, gamma: list[float]):
         self.gammas = gamma
@@ -71,15 +70,12 @@ class GI_DOAEnet(torch.nn.Module):
         
         # Channel invariant feature extraction
         x_feature=self.CIFE(x_stft) # B, C, M, T 
-
-        # Microphone positional encoding
-        MPE= self.MPE(mic_coordinate) # B, C, M
     
         # Spatio-temporal dual-path block
-        x_spatio_temporal=self.STDPBs(x_feature, MPE) # B, C, M, T 
+        x_spatio_temporal=self.STDPBs(x_feature, mic_coordinate) # B, C, M, T 
 
         # Spectrum mapping
-        x_out_az = self.SSMBs(x_spatio_temporal)  # B, DS, Degree, T
+        x_out_az = self.SSMBs_azimuth(x_spatio_temporal)  # B, DS, Degree, T
         x_out_el = self.SSMBs_elvation(x_spatio_temporal)  # B, DS, Degree, T
         
         if return_target:

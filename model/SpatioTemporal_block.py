@@ -1,10 +1,13 @@
 import torch
 from torch.nn.modules.activation import MultiheadAttention
 from .util import channelwise_softmax_aggregation, LayerNorm
+from .RoPE import RoPE
+
 
 class Dualpath_block(torch.nn.Module):
     def __init__(self, num_heads, feature_size, rnn_layers=2):
         super(Dualpath_block, self).__init__()
+        self.rope = RoPE(d_model=feature_size)
 
         self.mhsa = MultiheadAttention(num_heads=num_heads, embed_dim=feature_size)
         self.rnn = torch.nn.GRU(input_size=2*feature_size, hidden_size=feature_size, bidirectional=False, batch_first=False, num_layers=rnn_layers)
@@ -16,9 +19,9 @@ class Dualpath_block(torch.nn.Module):
 
         self.activation = torch.nn.ELU()
 
-    def mhsa_forward(self, x, MPE):
+    def mhsa_forward(self, x, mic_coordinate):
         B, C, M, T = x.shape
-        x_steered = x + MPE
+        x_steered = self.rope(x, mic_coordinate)
 
         x_steered = x_steered.permute(0, 3, 1, 2).contiguous().view(B*T, C, M)
         x_steered = x_steered.permute(1, 0, 2) # C, B*T, M
@@ -48,9 +51,9 @@ class Dualpath_block(torch.nn.Module):
         out = out.view(B, 1, M, T)  # B, 1, M, T
         return out
     
-    def forward(self, x, MPE):
+    def forward(self, x, mic_coordinate):
 
-        out = self.mhsa_forward(x, MPE)  # Apply multi-head self-attention        
+        out = self.mhsa_forward(x, mic_coordinate)  # Apply multi-head self-attention        
         x = x + out
 
         out = self.rnn_forward(x)  # Apply RNN
@@ -70,11 +73,9 @@ class SpatioTemporal_block(torch.nn.Module):
                     feature_size=feature_size,
                     rnn_layers=rnn_layers))
             
-    def forward(self, x, MPE):     
+    def forward(self, x, mic_coordinate):
         B, C, M, T=x.shape
-        MPE=MPE.unsqueeze(-1)
-        MPE=torch.repeat_interleave(MPE, T, dim=-1)        
         for i in range(len(self.dualpath_block_list)):
-            x = self.dualpath_block_list[i](x, MPE) 
+            x = self.dualpath_block_list[i](x, mic_coordinate) 
 
         return x 

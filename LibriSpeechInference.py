@@ -10,13 +10,39 @@ torch.manual_seed(42)
 
 
 class LibriSpeechInference:
-    def __init__(self, data_path, mode, device, max_microphones, sample_rate, MPE_type):
+    def __init__(
+        self,
+        data_path,
+        mode,
+        device,
+        max_microphones,
+        sample_rate,
+        MPE_type,
+        model_version='v1',
+        num_microphones=None,
+        noise_probability=0.0,
+        snr_db=20
+    ):
+        """
+        Initialize LibriSpeechInference.
+        
+        Args:
+            data_path: Path to the data directory
+            mode: Dataset mode ('train', 'val', 'test')
+            device: PyTorch device
+            max_microphones: Maximum number of microphones
+            sample_rate: Audio sample rate
+            MPE_type: Type of microphone positional encoding ('PM', 'FM', etc.)
+            model_version: Model version to use ('v1' for azimuth only, 'v2' for azimuth + elevation)
+        """
         self.data_path = data_path
         self.mode = mode
         self.device = device
         self.max_microphones = max_microphones
         self.sample_rate = sample_rate
         self.MPE_type = MPE_type
+        self.model_version = model_version
+        self.num_microphones = num_microphones
 
         self.model = self.load_model()
 
@@ -27,16 +53,25 @@ class LibriSpeechInference:
             device=device,
             max_microphones=max_microphones,
             sample_rate=sample_rate,
-            training_phase=3
+            training_phase=3,
+            noise_probability=noise_probability,
+            snr_db=snr_db
         )
     
     def load_model(self):
-        print("Loading model...")
-        model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
-        # model_path = os.path.join(os.getcwd(), "saved_models", "GI_DOAEnet_fine_tuned", "GI_DOAEnet_fine_tuned.tar")
+        print(f"Loading model (version: {self.model_version})...")
+        if self.model_version == "v1":
+            model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
+        elif self.model_version == "v2":
+            model_path = os.path.join(os.getcwd(), "saved_models", "GI_DOAEnet_fine_tuned", "GI_DOAEnet_fine_tuned.tar")
+        else:
+            raise ValueError(f"Invalid model version: {self.model_version}")
+        
         pretrained = torch.load(model_path, map_location='cpu')
-        model = GI_DOAEnet(MPE_type=self.MPE_type)
-        model.load_state_dict(pretrained["model_state_dict"], strict=True)
+        if self.model_version == "v2":
+            pretrained = pretrained["model_state_dict"]
+        model = GI_DOAEnet(MPE_type=self.MPE_type, model_version=self.model_version)
+        model.load_state_dict(pretrained, strict=True)
         model.to(self.device)
         return model
     
@@ -60,15 +95,21 @@ class LibriSpeechInference:
     def __call__(self):
         self.model.eval()
 
-        self.dataset.sample_num_microphones()
+        if self.num_microphones is not None:
+            self.dataset.set_num_microphones(self.num_microphones)
+        else:
+            self.dataset.sample_num_microphones()
 
         dataloader = DataLoader(self.dataset, batch_size=1, shuffle=False, num_workers=0)
 
         total_azimuth_loss = 0
         total_elevation_loss = 0
         
-        for batch_idx, (audio, vad, room_params) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Inference"):
-            self.dataset.sample_num_microphones()
+        for batch_idx, (audio, vad, room_params) in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Inference ({self.model_version})"):
+            if self.num_microphones is not None:
+                self.dataset.set_num_microphones(self.num_microphones)
+            else:
+                self.dataset.sample_num_microphones()
             
             audio = audio.to(self.device)
             vad = vad.to(self.device)
@@ -76,75 +117,168 @@ class LibriSpeechInference:
             source_coordinates = room_params['source_coords'].to(self.device)
 
             with torch.no_grad():
-                x_out_az, x_out_el, target_az, target_el, vad_framed = self.model(audio, mic_coordinates, vad, source_coordinates, return_target=True)
-            
-            # Get peaks for azimuth (last depth scale output)
-            peaks_az, peaks_idx_az = torch.max(x_out_az[:, -1, :, :], dim=1)
-            # Get peaks for elevation (last depth scale output)
-            peaks_el, peaks_idx_el = torch.max(x_out_el[:, -1, :, :], dim=1)
-            peaks_idx_el += 30
+                if self.model_version == 'v1':
+                    # V1: Only azimuth output
+                    x_out, target, vad_framed = self.model(audio, mic_coordinates, vad, source_coordinates, return_target=True)
+                    
+                    # Get peaks for azimuth (last depth scale output)
+                    peaks_az, peaks_idx_az = torch.max(x_out[:, -1, :, :], dim=1)
+                    
+                    # Calculate MAE for azimuth only
+                    loss_az = self.MAE_azimuth(peaks_idx_az, source_coordinates, vad_framed)
+                    total_azimuth_loss += loss_az.item()
+                    
+                elif self.model_version == 'v2':
+                    # V2: Both azimuth and elevation outputs
+                    x_out_az, x_out_el, target_az, target_el, vad_framed = self.model(audio, mic_coordinates, vad, source_coordinates, return_target=True)
+                    
+                    # Get peaks for azimuth (last depth scale output)
+                    peaks_az, peaks_idx_az = torch.max(x_out_az[:, -1, :, :], dim=1)
+                    # Get peaks for elevation (last depth scale output)
+                    peaks_el, peaks_idx_el = torch.max(x_out_el[:, -1, :, :], dim=1)
+                    peaks_idx_el += 30
 
-            # Calculate MAE for azimuth and elevation separately
-            loss_az = self.MAE_azimuth(peaks_idx_az, source_coordinates, vad_framed)
-            loss_el = self.MAE_elevation(peaks_idx_el, source_coordinates, vad_framed)
-            
-            total_azimuth_loss += loss_az.item()
-            total_elevation_loss += loss_el.item()
+                    # Calculate MAE for azimuth and elevation separately
+                    loss_az = self.MAE_azimuth(peaks_idx_az, source_coordinates, vad_framed)
+                    loss_el = self.MAE_elevation(peaks_idx_el, source_coordinates, vad_framed)
+                    
+                    total_azimuth_loss += loss_az.item()
+                    total_elevation_loss += loss_el.item()
         
         avg_azimuth_loss = total_azimuth_loss / len(dataloader)
-        avg_elevation_loss = total_elevation_loss / len(dataloader)
         
-        return avg_azimuth_loss, avg_elevation_loss
+        if self.model_version == 'v1':
+            # V1: Return only azimuth loss (elevation is None)
+            return avg_azimuth_loss, None
+        else:
+            # V2: Return both azimuth and elevation losses
+            avg_elevation_loss = total_elevation_loss / len(dataloader)
+            return avg_azimuth_loss, avg_elevation_loss
             
             
 
 if __name__ == "__main__":
-    data_path = os.path.join(os.getcwd(), "data")
-    mode = "test"
-    max_microphones = 12
-    sample_rate = 16000
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    import argparse
     
-    inference_pm = LibriSpeechInference(
-        data_path=data_path,
-        mode=mode,
+    parser = argparse.ArgumentParser(description='Run GI-DOAEnet inference on LibriSpeech dataset')
+    
+    # Dataset parameters
+    parser.add_argument('--data_path', type=str, default=os.path.join(os.getcwd(), "data"),
+                        help='Path to the data directory (default: ./data)')
+    parser.add_argument('--mode', type=str, default='test', choices=['train', 'validation', 'test'],
+                        help='Dataset mode (default: test)')
+    parser.add_argument('--max_microphones', type=int, default=12,
+                        help='Maximum number of microphones (default: 12)')
+    parser.add_argument('--num_microphones', type=int, default=None,
+                        help='Fixed number of microphones (default: None, random sampling)')
+    parser.add_argument('--sample_rate', type=int, default=16000,
+                        help='Audio sample rate in Hz (default: 16000)')
+    
+    # Model parameters
+    parser.add_argument('--model_version', type=str, default='v1', choices=['v1', 'v2'],
+                        help='Model version: v1 (azimuth only) or v2 (azimuth + elevation) (default: v1)')
+    parser.add_argument('--mpe_type', type=str, default='PM', choices=['PM', 'FM'],
+                        help='Microphone Positional Encoding type (default: PM)')
+    
+    # Output parameters
+    parser.add_argument('--output', type=str, default='results.json',
+                        help='Output JSON file path (default: results.json)')
+    
+    # Device
+    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'cpu'],
+                        help='Device to use (default: auto)')
+    
+    # Noise parameters
+    parser.add_argument('--noise_probability', type=float, default=0.0,
+                        help='Probability of adding noise (default: 0.0)')
+    parser.add_argument('--snr_db', type=int, default=20,
+                        help='Signal-to-noise ratio in dB (default: 20)')
+    
+    args = parser.parse_args()
+    
+    # Set device
+    if args.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
+    
+    results_path = os.path.join(os.getcwd(), "results", args.output)
+    os.makedirs(os.path.dirname(results_path), exist_ok=True)
+
+    print(f"\n{'='*60}")
+    print(f"GI-DOAEnet Inference - Configuration")
+    print(f"{'='*60}")
+    print(f"Data path: {args.data_path}")
+    print(f"Mode: {args.mode}")
+    print(f"Model version: {args.model_version}")
+    print(f"MPE type: {args.mpe_type}")
+    print(f"Max microphones: {args.max_microphones}")
+    print(f"Fixed microphones: {args.num_microphones if args.num_microphones else 'Random sampling'}")
+    print(f"Device: {device}")
+    print(f"Output: {args.output}")
+    print(f"{'='*60}\n")
+    
+    # Create inference instance
+    inference = LibriSpeechInference(
+        data_path=args.data_path,
+        mode=args.mode,
         device=device,
-        max_microphones=max_microphones,
-        sample_rate=sample_rate,
-        MPE_type="PM"
+        max_microphones=args.max_microphones,
+        sample_rate=args.sample_rate,
+        MPE_type=args.mpe_type,
+        model_version=args.model_version,
+        num_microphones=args.num_microphones,
+        noise_probability=args.noise_probability,
+        snr_db=args.snr_db
     )
-
-    # inference_fm = LibriSpeechInference(
-    #     data_path=data_path,
-    #     mode=mode,
-    #     device=device,
-    #     max_microphones=max_microphones,
-    #     sample_rate=sample_rate,
-    #     MPE_type="FM"
-    # )
-
-    pm_loss_az, pm_loss_el = inference_pm()
-    print(f"PM Average Azimuth MAE: {pm_loss_az:.2f} degrees")
-    print(f"PM Average Elevation MAE: {pm_loss_el:.2f} degrees")
-    print(f"PM Average Combined MAE: {(pm_loss_az + pm_loss_el) / 2:.2f} degrees")
     
-    # fm_loss_az, fm_loss_el = inference_fm()
-    # print(f"FM Average Azimuth MAE: {fm_loss_az:.2f} degrees")
-    # print(f"FM Average Elevation MAE: {fm_loss_el:.2f} degrees")
+    # Run inference
+    loss_az, loss_el = inference()
     
-    loss = {
-        "PM_azimuth": pm_loss_az,
-        "PM_elevation": pm_loss_el,
-        "PM_combined": (pm_loss_az + pm_loss_el) / 2,
-        # "FM_azimuth": fm_loss_az,
-        # "FM_elevation": fm_loss_el,
-        # "FM_combined": (fm_loss_az + fm_loss_el) / 2,
-    }
-
-    results_path = os.path.join(os.getcwd(), "results.json")    
+    # Display results
+    print(f"\n{'='*60}")
+    print(f"Results for Model Version: {args.model_version.upper()} - MPE: {args.mpe_type}")
+    print(f"{'='*60}")
+    print(f"Average Azimuth MAE: {loss_az:.2f} degrees")
+    
+    if loss_el is not None:
+        # V2 model has elevation
+        print(f"Average Elevation MAE: {loss_el:.2f} degrees")
+        
+        results = {
+            "model_version": args.model_version,
+            "mpe_type": args.mpe_type,
+            "mode": args.mode,
+            "max_microphones": args.max_microphones,
+            "fixed_microphones": args.num_microphones,
+            "azimuth_mae": loss_az,
+            "elevation_mae": loss_el,
+            "noise_probability": args.noise_probability,
+            "snr_db": args.snr_db
+        }
+    else:
+        # V1 model has only azimuth
+        print(f"Elevation: N/A (V1 model only predicts azimuth)")
+        
+        results = {
+            "model_version": args.model_version,
+            "mpe_type": args.mpe_type,
+            "mode": args.mode,
+            "max_microphones": args.max_microphones,
+            "fixed_microphones": args.num_microphones,
+            "azimuth_mae": loss_az,
+            "elevation_mae": None,
+            "noise_probability": args.noise_probability,
+            "snr_db": args.snr_db
+        }
+    
+    print(f"{'='*60}\n")
+    
+    # Save results
     with open(results_path, "w") as f:
-        json.dump(loss, f)
-
+        json.dump(results, f, indent=2)
+    
+    print(f"Results saved to: {results_path}")
 
 # Losses for regular GI-DOAEnet:
 # PM: 4.1 degrees

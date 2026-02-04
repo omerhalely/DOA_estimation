@@ -12,7 +12,7 @@ import webrtcvad
 
 
 class LibriSpeechDataset(Dataset):
-    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000, training_phase=1, logger=None):
+    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000, training_phase=1, logger=None, noise_probability=0.0, snr_db=20.0):
         """
         LibriSpeech dataset with room impulse response simulation.
         
@@ -25,6 +25,9 @@ class LibriSpeechDataset(Dataset):
                 Phase 1: Fixed 4 microphones with fixed geometry
                 Phase 2: Fixed 4 microphones with random geometry
                 Phase 3: Random microphones (4-max) with random geometry
+            logger: Optional logger for training messages
+            noise_probability: Probability of adding Gaussian noise to each microphone (0.0 to 1.0)
+            snr_db: Target Signal-to-Noise Ratio in dB when noise is added (default: 20.0)
         """
         self.data_path = data_path
         self.mode = mode
@@ -35,6 +38,10 @@ class LibriSpeechDataset(Dataset):
         self.device = device
         self.max_microphones = max_microphones
         self.logger = logger  # Optional logger for training messages
+        
+        # Noise configuration
+        self.noise_probability = noise_probability
+        self.snr_db = snr_db
 
         self.num_microphones = 4
         
@@ -171,6 +178,52 @@ class LibriSpeechDataset(Dataset):
         else:
             # Phase 3: Random number of microphones
             self.num_microphones = torch.randint(4, self.max_microphones + 1, (1,), device=self.device).item()
+    
+    def set_num_microphones(self, num_microphones):
+        self.num_microphones = num_microphones
+    
+    def _add_gaussian_noise(self, audio_channel, vad_channel):
+        """
+        Add Gaussian noise to an audio channel with specified SNR.
+        
+        Args:
+            audio_channel: Single channel audio tensor (T,) on self.device
+            vad_channel: Voice activity detection tensor (T,) on self.device
+            
+        Returns:
+            Noisy audio channel with target SNR
+        """
+        # Calculate signal power during speech regions only (for proper SNR scaling)
+        speech_indices = vad_channel == 1
+        
+        if speech_indices.sum() == 0:
+            # No speech detected - skip noise addition or use full signal power
+            signal_power = torch.mean(audio_channel ** 2)
+        else:
+            signal_speech = audio_channel[speech_indices]
+            signal_power = torch.mean(signal_speech ** 2)
+        
+        # Avoid division by zero
+        if signal_power < 1e-10:
+            # Signal is too quiet, return original audio
+            return audio_channel
+        
+        # Calculate target noise power from SNR
+        # SNR_dB = 10 * log10(signal_power / noise_power)
+        # noise_power = signal_power / (10 ** (SNR_dB / 10))
+        noise_power = signal_power / (10 ** (self.snr_db / 10))
+        
+        # Generate Gaussian noise for ENTIRE signal (not just speech)
+        noise = torch.randn_like(audio_channel)
+        
+        # Scale noise to achieve target SNR
+        current_noise_power = torch.mean(noise ** 2)
+        noise = noise * torch.sqrt(noise_power / current_noise_power)
+        
+        # Add noise to ENTIRE signal (both speech and silence)
+        noisy_audio = audio_channel + noise
+        
+        return noisy_audio
 
     def _generate_random_room(self):
         # 1. Randomize Room Dimensions (Table III)
@@ -366,12 +419,21 @@ class LibriSpeechDataset(Dataset):
             padding = self.target_samples - multi_channel_audio.shape[1]
             multi_channel_audio = F.pad(multi_channel_audio, (0, padding), mode='constant', value=0)
         
+        # Add Gaussian noise if configured
+        if torch.rand(1).item() < self.noise_probability:
+            for mic_idx in range(num_mics):
+                multi_channel_audio[mic_idx] = self._add_gaussian_noise(
+                    multi_channel_audio[mic_idx],
+                    vad[mic_idx]
+                )
+        
         params = {
             'mic_coords': positions["receiver"]["mic_coords"],
             'source_coords': positions["source"],
             'num_mics': num_mics
         }
         return multi_channel_audio, vad, params
+
 
 
 if __name__ == "__main__":
@@ -383,12 +445,22 @@ if __name__ == "__main__":
     max_microphones = 12
     sample_rate = 16000
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Test with noise enabled
+    print("\n" + "="*60)
+    print("Testing with Gaussian Noise")
+    print("="*60)
+    noise_probability = 1.0  # 100% probability for testing
+    snr_db = 30.0
+    
     # Create dataset instance
     dataset = LibriSpeechDataset(
         data_path=data_path,
         mode=mode,
         sample_rate=sample_rate,
-        device=device
+        device=device,
+        noise_probability=noise_probability,
+        snr_db=snr_db
     )
 
     dataset.set_training_phase(3)

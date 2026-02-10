@@ -16,12 +16,12 @@ def target_spatial_spectrum(target_polar_position, vad_framed, gammas):
         target_el: Elevation target spectrum (B, num_gamma, 120, T)
     """
     azimuth_degrees = 360
-    elevation_degrees = 120
+    elevation_degrees = 360
     target_azimuths= torch.rad2deg(target_polar_position[..., 1].unsqueeze(1)).unsqueeze(-1)  # B, Spk, 1
-    cadidate_azimuths = torch.linspace(0, 360, azimuth_degrees, device=target_azimuths.device).view(1, 1, -1)
+    cadidate_azimuths = torch.linspace(0, 359, azimuth_degrees, device=target_azimuths.device).view(1, 1, -1)
 
     target_elevations= torch.rad2deg(target_polar_position[..., 2].unsqueeze(1)).unsqueeze(-1)  # B, Spk, 1
-    cadidate_elevations = torch.linspace(30, 150, elevation_degrees, device=target_elevations.device).view(1, 1, -1)
+    cadidate_elevations = torch.linspace(30, 149, elevation_degrees, device=target_elevations.device).view(1, 1, -1)
 
     distance_abs = torch.abs(target_azimuths - cadidate_azimuths)  # B, Spk, num_candidate
     distance_abs = torch.stack((distance_abs, 360 - distance_abs), dim=0)  # 2, B, Spk, num_candidate

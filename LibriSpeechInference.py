@@ -12,8 +12,10 @@ torch.manual_seed(42)
 class LibriSpeechInference:
     def __init__(
         self,
+        model_name,
         data_path,
         mode,
+        fine_tuned,
         device,
         max_microphones,
         sample_rate,
@@ -21,7 +23,8 @@ class LibriSpeechInference:
         model_version='v1',
         num_microphones=None,
         noise_probability=0.0,
-        snr_db=20
+        snr_db=20,
+        reverberation_time=None
     ):
         """
         Initialize LibriSpeechInference.
@@ -35,8 +38,10 @@ class LibriSpeechInference:
             MPE_type: Type of microphone positional encoding ('PM', 'FM', etc.)
             model_version: Model version to use ('v1' for azimuth only, 'v2' for azimuth + elevation)
         """
+        self.model_name = model_name
         self.data_path = data_path
         self.mode = mode
+        self.fine_tuned = fine_tuned
         self.device = device
         self.max_microphones = max_microphones
         self.sample_rate = sample_rate
@@ -55,20 +60,25 @@ class LibriSpeechInference:
             sample_rate=sample_rate,
             training_phase=3,
             noise_probability=noise_probability,
-            snr_db=snr_db
+            snr_db=snr_db,
+            constant_snr=True,
+            reverberation=reverberation_time
         )
     
     def load_model(self):
         print(f"Loading model (version: {self.model_version})...")
         if self.model_version == "v1":
-            model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
+            if self.fine_tuned:
+                model_path = os.path.join(os.getcwd(), "saved_models", self.model_name, f"{self.model_name}.tar")
+            else:
+                model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
         elif self.model_version == "v2":
-            model_path = os.path.join(os.getcwd(), "saved_models", "GI_DOAEnet_fine_tuned", "GI_DOAEnet_fine_tuned.tar")
+            model_path = os.path.join(os.getcwd(), "saved_models", self.model_name, f"{self.model_name}.tar")
         else:
             raise ValueError(f"Invalid model version: {self.model_version}")
         
         pretrained = torch.load(model_path, map_location='cpu')
-        if self.model_version == "v2":
+        if self.model_version == "v2" or self.fine_tuned:
             pretrained = pretrained["model_state_dict"]
         model = GI_DOAEnet(MPE_type=self.MPE_type, model_version=self.model_version)
         model.load_state_dict(pretrained, strict=True)
@@ -136,6 +146,7 @@ class LibriSpeechInference:
                     peaks_az, peaks_idx_az = torch.max(x_out_az[:, -1, :, :], dim=1)
                     # Get peaks for elevation (last depth scale output)
                     peaks_el, peaks_idx_el = torch.max(x_out_el[:, -1, :, :], dim=1)
+                    peaks_idx_el = peaks_idx_el.float() / 3.0
                     peaks_idx_el += 30
 
                     # Calculate MAE for azimuth and elevation separately
@@ -175,8 +186,12 @@ if __name__ == "__main__":
                         help='Audio sample rate in Hz (default: 16000)')
     
     # Model parameters
-    parser.add_argument('--model_version', type=str, default='v1', choices=['v1', 'v2'],
-                        help='Model version: v1 (azimuth only) or v2 (azimuth + elevation) (default: v1)')
+    parser.add_argument('--model_name', type=str, default='v2',
+                        help='Model name (default: v2)')
+    parser.add_argument('--fine_tuned', type=bool, default=True,
+                        help='Use fine-tuned model (default: True)')
+    parser.add_argument('--model_version', type=str, default='v2', choices=['v1', 'v2'],
+                        help='Model version: v1 (azimuth only) or v2 (azimuth + elevation) (default: v2)')
     parser.add_argument('--mpe_type', type=str, default='PM', choices=['PM', 'FM'],
                         help='Microphone Positional Encoding type (default: PM)')
     
@@ -189,10 +204,14 @@ if __name__ == "__main__":
                         help='Device to use (default: auto)')
     
     # Noise parameters
-    parser.add_argument('--noise_probability', type=float, default=0.0,
+    parser.add_argument('--noise_probability', type=float, default=1.0,
                         help='Probability of adding noise (default: 0.0)')
-    parser.add_argument('--snr_db', type=int, default=20,
-                        help='Signal-to-noise ratio in dB (default: 20)')
+    parser.add_argument('--snr_db', type=int, default=30,
+                        help='Signal-to-noise ratio in dB (default: 30)')
+    
+    # Room acoustics parameters
+    parser.add_argument('--reverberation_time', type=float, default=None,
+                        help='Fixed reverberation time (RT60) in seconds (default: None, random between 0.2-1.3s)')
     
     args = parser.parse_args()
     
@@ -211,17 +230,23 @@ if __name__ == "__main__":
     print(f"Data path: {args.data_path}")
     print(f"Mode: {args.mode}")
     print(f"Model version: {args.model_version}")
+    print(f"Fine-tuned: {args.fine_tuned}")
     print(f"MPE type: {args.mpe_type}")
     print(f"Max microphones: {args.max_microphones}")
     print(f"Fixed microphones: {args.num_microphones if args.num_microphones else 'Random sampling'}")
+    print(f"Noise probability: {args.noise_probability}")
+    print(f"SNR: {args.snr_db}")
+    print(f"Reverberation time: {args.reverberation_time if args.reverberation_time else 'Random between 0.2-1.3s'}")
     print(f"Device: {device}")
     print(f"Output: {args.output}")
     print(f"{'='*60}\n")
     
     # Create inference instance
     inference = LibriSpeechInference(
+        model_name=args.model_name,
         data_path=args.data_path,
         mode=args.mode,
+        fine_tuned=args.fine_tuned,
         device=device,
         max_microphones=args.max_microphones,
         sample_rate=args.sample_rate,
@@ -229,7 +254,8 @@ if __name__ == "__main__":
         model_version=args.model_version,
         num_microphones=args.num_microphones,
         noise_probability=args.noise_probability,
-        snr_db=args.snr_db
+        snr_db=args.snr_db,
+        reverberation_time=args.reverberation_time
     )
     
     # Run inference
@@ -254,7 +280,8 @@ if __name__ == "__main__":
             "azimuth_mae": loss_az,
             "elevation_mae": loss_el,
             "noise_probability": args.noise_probability,
-            "snr_db": args.snr_db
+            "snr_db": args.snr_db,
+            "reverberation_time": args.reverberation_time
         }
     else:
         # V1 model has only azimuth
@@ -269,7 +296,8 @@ if __name__ == "__main__":
             "azimuth_mae": loss_az,
             "elevation_mae": None,
             "noise_probability": args.noise_probability,
-            "snr_db": args.snr_db
+            "snr_db": args.snr_db,
+            "reverberation_time": args.reverberation_time
         }
     
     print(f"{'='*60}\n")

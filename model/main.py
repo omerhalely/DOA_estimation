@@ -39,14 +39,13 @@ class GI_DOAEnet(torch.nn.Module):
                                                         dilation_rate=2, 
                                                         num_blocks=4)
 
-        # Version-specific components
-        if model_version == 'v1':
-            # V1: Basic model with MPE and azimuth only
-            self.MPE = MicrophonePositionalEncoding(feature=self.feature_size,
+        self.MPE = MicrophonePositionalEncoding(feature=self.feature_size,
                                                     MPE_type=MPE_type,
                                                     alpha=7,
                                                     beta=4)
-            
+                                                    
+        # Version-specific components
+        if model_version == 'v1':            
             self.STDPBs = SpatioTemporal_block_v1(n_heads=16,
                                                      num_blocks=4,
                                                      feature_size=self.feature_size,
@@ -63,7 +62,7 @@ class GI_DOAEnet(torch.nn.Module):
             
         elif model_version == 'v2':
             # V2: Improved model with RoPE and azimuth + elevation
-            self.STDPBs = SpatioTemporal_block(n_heads=16,
+            self.STDPBs = SpatioTemporal_block_v1(n_heads=16,
                                               num_blocks=4,
                                               feature_size=self.feature_size,
                                               rnn_layers=2)
@@ -79,7 +78,7 @@ class GI_DOAEnet(torch.nn.Module):
 
             self.SSMBs_elevation = Spatial_spectrum_mapping(
                 feature=self.feature_size,
-                total_degrees=120,
+                total_degrees=360,
                 degree_resolution=1, 
                 num_blocks=3,
                 kernel_size=3, 
@@ -159,10 +158,13 @@ class GI_DOAEnet(torch.nn.Module):
         x_stft = torch.cat([x_stft_r, x_stft_i], dim=2)  # B, C, 2F, T
         
         # Channel invariant feature extraction
-        x_feature = self.CIFE(x_stft)  # B, C, M, T 
+        x_feature = self.CIFE(x_stft)  # B, C, M, T
+
+        # Microphone positional encoding
+        MPE = self.MPE(mic_coordinate)  # B, C, M
     
         # Spatio-temporal dual-path block (V2 with RoPE)
-        x_spatio_temporal = self.STDPBs(x_feature, mic_coordinate)  # B, C, M, T 
+        x_spatio_temporal = self.STDPBs(x_feature, MPE)  # B, C, M, T 
 
         # Spectrum mapping (azimuth and elevation)
         x_out_az = self.SSMBs_azimuth(x_spatio_temporal)  # B, DS, Degree, T
@@ -173,7 +175,7 @@ class GI_DOAEnet(torch.nn.Module):
             target_az, target_el = target_spatial_spectrum(
                 polar_position,
                 vad_framed,
-                self.gammas,
+                self.gammas
             )  # B, DS, Degree, T
 
             return x_out_az, x_out_el, target_az, target_el, vad_framed

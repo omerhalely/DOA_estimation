@@ -12,7 +12,20 @@ import webrtcvad
 
 
 class LibriSpeechDataset(Dataset):
-    def __init__(self, data_path, mode, device, max_microphones=12, sample_rate=16000, training_phase=1, logger=None, noise_probability=0.0, snr_db=20.0):
+    def __init__(
+        self, 
+        data_path, 
+        mode, 
+        device, 
+        max_microphones=12, 
+        sample_rate=16000, 
+        training_phase=1, 
+        logger=None, 
+        noise_probability=0.0, 
+        snr_db=20.0,
+        constant_snr=False,
+        reverberation=None
+    ):
         """
         LibriSpeech dataset with room impulse response simulation.
         
@@ -21,10 +34,11 @@ class LibriSpeechDataset(Dataset):
             mode: One of 'train', 'validation', or 'test'
             sample_rate: Audio sample rate in Hz (default: 16000)
             device: PyTorch device ('cuda', 'cpu', or None for auto-detect)
-            training_phase: Training curriculum phase (1, 2, or 3):
+            training_phase: Training curriculum phase (1, 2, 3, or 4):
                 Phase 1: Fixed 4 microphones with fixed geometry
                 Phase 2: Fixed 4 microphones with random geometry
                 Phase 3: Random microphones (4-max) with random geometry
+                Phase 4: Reducing gamma
             logger: Optional logger for training messages
             noise_probability: Probability of adding Gaussian noise to each microphone (0.0 to 1.0)
             snr_db: Target Signal-to-Noise Ratio in dB when noise is added (default: 20.0)
@@ -38,10 +52,12 @@ class LibriSpeechDataset(Dataset):
         self.device = device
         self.max_microphones = max_microphones
         self.logger = logger  # Optional logger for training messages
+        self.reverberation = reverberation
         
         # Noise configuration
         self.noise_probability = noise_probability
         self.snr_db = snr_db
+        self.constant_snr = constant_snr
 
         self.num_microphones = 4
         
@@ -73,15 +89,15 @@ class LibriSpeechDataset(Dataset):
     
     def _validate_phase(self):
         """Validate that the training phase is valid."""
-        if self.training_phase not in [1, 2, 3]:
-            raise ValueError(f"Training phase must be 1, 2, or 3, got {self.training_phase}")
+        if self.training_phase not in [1, 2, 3, 4]:
+            raise ValueError(f"Training phase must be 1, 2, 3, or 4, got {self.training_phase}")
     
     def set_training_phase(self, phase):
         """
         Change the training phase.
         
         Args:
-            phase: New training phase (1, 2, or 3)
+            phase: New training phase (1, 2, 3, or 4)
         """
         self.training_phase = phase
         self._validate_phase()
@@ -98,6 +114,8 @@ class LibriSpeechDataset(Dataset):
             message += " -> Fixed 4 microphones with random geometry"
         elif phase == 3:
             message += f" -> Random microphones (4-{self.max_microphones}) with random geometry"
+        elif phase == 4:
+            message += f" -> Reducing Gamma"
         
         if self.logger:
             self.logger.info(message)
@@ -138,6 +156,25 @@ class LibriSpeechDataset(Dataset):
         
         self._fixed_mic_coords = mpos_local
         print(f"Initialized fixed microphone array for Phase 1 with {num_channels} microphones")
+        
+        # Convert Cartesian (x, y, z) to Spherical (r, theta, phi)
+        # theta = azimuth angle (0-360 degrees)
+        # phi = elevation angle (0-180 degrees, where 90 is horizontal)
+        x, y, z = mpos_local[:, 0], mpos_local[:, 1], mpos_local[:, 2]
+        r = torch.sqrt(x**2 + y**2 + z**2)
+        theta = torch.atan2(y, x)  # Azimuth in radians
+        phi = torch.acos(z / (r + 1e-8))  # Elevation in radians (add small epsilon to avoid division by zero)
+        
+        # Convert to degrees
+        theta_deg = torch.rad2deg(theta)
+        phi_deg = torch.rad2deg(phi)
+        
+        # Make theta in range [0, 360] instead of [-180, 180]
+        theta_deg = (theta_deg + 360) % 360
+        
+        print("Microphone positions (Spherical coordinates):")
+        for i in range(num_channels):
+            print(f"  Mic {i+1}: θ (azimuth) = {theta_deg[i]:.2f}°, φ (elevation) = {phi_deg[i]:.2f}°, r = {r[i]:.4f}m")
 
     def __len__(self):
         return len(self.files)
@@ -179,6 +216,9 @@ class LibriSpeechDataset(Dataset):
             # Phase 3: Random number of microphones
             self.num_microphones = torch.randint(4, self.max_microphones + 1, (1,), device=self.device).item()
     
+    def sample_snr(self):
+        self.snr_db = torch.randint(5, 31, (1,), device=self.device).item()
+
     def set_num_microphones(self, num_microphones):
         self.num_microphones = num_microphones
     
@@ -234,7 +274,10 @@ class LibriSpeechDataset(Dataset):
         ], dtype=torch.float32, device=self.device)
         
         # 2. Randomize RT60 (Table III)
-        rt60 = torch.empty(1, device=self.device).uniform_(0.2, 1.3).item()
+        if self.reverberation is not None:
+            rt60 = self.reverberation
+        else:
+            rt60 = torch.empty(1, device=self.device).uniform_(0.2, 1.3).item()
         fs = 16000  # Sampling rate used in paper
 
         # 3. Dynamic Microphone Geometry (Section III-A)
@@ -421,6 +464,8 @@ class LibriSpeechDataset(Dataset):
         
         # Add Gaussian noise if configured
         if torch.rand(1).item() < self.noise_probability:
+            if not self.constant_snr:
+                self.sample_snr()
             for mic_idx in range(num_mics):
                 multi_channel_audio[mic_idx] = self._add_gaussian_noise(
                     multi_channel_audio[mic_idx],

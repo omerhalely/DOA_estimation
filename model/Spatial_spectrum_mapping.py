@@ -28,6 +28,10 @@ class Spatial_spectrum_mapping(torch.nn.Module):
             
             self.mapping_layers.append(torch.nn.Linear(2 * self.feature, self.degree_candidate, bias=False))
 
+    def init_linear_layers(self):
+        for layer in self.mapping_layers:
+            torch.nn.init.zeros_(layer.weight)
+
     def forward(self, x):
 
         x=channelwise_softmax_aggregation(x, std=True)

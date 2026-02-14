@@ -186,12 +186,12 @@ if __name__ == "__main__":
                         help='Audio sample rate in Hz (default: 16000)')
     
     # Model parameters
-    parser.add_argument('--model_name', type=str, default='v2',
-                        help='Model name (default: v2)')
-    parser.add_argument('--fine_tuned', type=bool, default=True,
-                        help='Use fine-tuned model (default: True)')
-    parser.add_argument('--model_version', type=str, default='v2', choices=['v1', 'v2'],
-                        help='Model version: v1 (azimuth only) or v2 (azimuth + elevation) (default: v2)')
+    parser.add_argument('--model_name', type=str, default='v1',
+                        help='Model name (default: v1)')
+    parser.add_argument('--fine_tuned', type=bool, default=False,
+                        help='Use fine-tuned model (default: False)')
+    parser.add_argument('--model_version', type=str, default='v1', choices=['v1', 'v2'],
+                        help='Model version: v1 (azimuth only) or v2 (azimuth + elevation) (default: v1)')
     parser.add_argument('--mpe_type', type=str, default='PM', choices=['PM', 'FM'],
                         help='Microphone Positional Encoding type (default: PM)')
     

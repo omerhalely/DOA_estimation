@@ -52,8 +52,6 @@ class Trainer:
         self.logger = util.setup_logger(self.model_name)
         self.writer = util.setup_tensorboard(self.model_name, self.logger)
 
-        self.model = self.load_model()
-
         # Initialize optimizer with Phase 1 parameters
         lr, weight_decay = util.get_phase_optimizer_params(self.training_phase)
         self.optimizer = optim.AdamW(
@@ -93,39 +91,6 @@ class Trainer:
         for layer in layer_names:
             for param in getattr(model, layer).parameters():
                 param.requires_grad = False
-
-    def load_model(self):
-        self.logger.info(f"Loading pretrained model (version: {self.model_version})...")
-        model_path = os.path.join(os.getcwd(), "pretrained", "GI_DOAEnet_{}.tar".format(self.MPE_type))
-        pretrained = torch.load(model_path, map_location='cpu')
-        
-        # Initialize model with version specification
-        model = GI_DOAEnet(MPE_type=self.MPE_type, model_version=self.model_version)
-        
-        if self.model_version == 'v1':
-            # V1: Load entire pretrained model
-            # model.load_state_dict(pretrained, strict=True)
-            # self.logger.info("Loaded entire pretrained model (v1)")
-            
-            # Freeze only CIFE parameters for fine-tuning
-            # layers_to_freeze = ['STFT', 'CIFE', 'MPE', 'STDPBs']
-            layers_to_freeze = []
-        
-        else:  # v2
-            # V2: Load only CIFE (Channel_invariant_feature_extractor) since architecture differs (RoPE vs MPE)
-            # cife_state_dict = {k.replace('CIFE.', ''): v for k, v in pretrained.items() if k.startswith('CIFE.')}
-            # model.CIFE.load_state_dict(cife_state_dict, strict=True)
-            # self.logger.info("Loaded CIFE (Channel Independent Feature Extractor) from pretrained model")
-            
-            # Do not freeze any layers for V2 model
-            layers_to_freeze = []
-        
-        self.freeze_layers(model, layers_to_freeze)
-        
-        self.logger.info(f"Frozen {', '.join(layers_to_freeze) if len(layers_to_freeze) > 0 else 'None'}. All other layers are trainable.")
-        
-        model.to(self.device)
-        return model
     
     def load_checkpoint(self):
         """Load checkpoint to resume training from a previous state."""
@@ -149,11 +114,6 @@ class Trainer:
         # Load scheduler state
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.logger.info("Loaded scheduler state from checkpoint")
-        
-        # Load training metadata
-        # self.start_epoch = checkpoint['epoch'] + 1  # Resume from next epoch
-        self.training_phase = checkpoint['training_phase']
-        self.min_loss = checkpoint['min_loss']
         
         # Load model version if available in checkpoint (for backwards compatibility)
         if 'model_version' in checkpoint:
@@ -356,9 +316,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Fine-tune GI-DOAEnet model')
     
     # Model configuration
-    parser.add_argument('--model_name', type=str, default='v2',
-                        help='Name of the model (default: GI_DOAEnet_fine_tuned)')
-    parser.add_argument('--model_version', type=str, default='v2', choices=['v1', 'v2'],
+    parser.add_argument('--model_name', type=str, default='v1',
+                        help='Name of the model (default: v1)')
+    parser.add_argument('--model_version', type=str, default='v1', choices=['v1', 'v2'],
                         help='Model version: v1 (azimuth only) or v2 (azimuth + elevation) (default: v1)')
     parser.add_argument('--mpe_type', type=str, default='PM', choices=['PM', 'FM'],
                         help='Microphone positional encoding type (default: PM)')

@@ -204,7 +204,7 @@ def compute_bce_loss(epoch, pred, target, vad, alpha=10.0):
     num_outputs = pred.shape[1]
 
     # Check if we should use weighted loss (when gamma is [1.0, 1.0, 1.0])
-    if get_gamma_for_epoch(epoch) == [1.0, 1.0, 1.0]:
+    if epoch >= 300:
         # Weighted BCE loss
         for i in range(num_outputs):
             layer_pred = pred[:, i, ...].unsqueeze(1)
